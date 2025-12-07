@@ -1,0 +1,6 @@
+path: /Users/emirhan/Desktop/field-seg/dataset
+train: images/train
+val: images/val
+
+names:
+  0: field
