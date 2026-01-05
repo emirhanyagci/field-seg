@@ -4,18 +4,28 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
-from .yolo_config import write_data_yaml
+# Windows uyumluluğu için import
+try:
+    from .yolo_config import write_data_yaml
+except ImportError:
+    from yolo_config import write_data_yaml
 
 
 def train(
     data_yaml: Path,
-    model_name: str = "yolov8n-seg.pt",
-    epochs: int = 50,
-    imgsz: int = 512,
-    batch: int = 8,
+    model_name: str = "yolov8s-seg.pt",  # nano yerine small önerilir
+    epochs: int = 100,  # daha fazla epoch
+    imgsz: int = 640,  # daha yüksek çözünürlük
+    batch: int = 16,  # GPU varsa daha büyük batch
     device: str = "cpu",
     project: Path = Path("models"),
     name: str = "field-seg",
+    patience: int = 50,  # early stopping
+    lr0: float = 0.001,  # daha düşük learning rate
+    cos_lr: bool = True,  # cosine learning rate scheduler
+    multi_scale: bool = False,  # multi-scale training (yavaşlatır ama iyileştirir)
+    cache: bool = False,  # RAM yeterliyse True yapabilirsiniz
+    workers: int = 8,  # data loading workers
 ) -> None:
     project.mkdir(parents=True, exist_ok=True)
     model = YOLO(model_name)
@@ -27,6 +37,23 @@ def train(
         device=device,
         project=str(project),
         name=name,
+        patience=patience,  # early stopping
+        lr0=lr0,  # initial learning rate
+        cos_lr=cos_lr,  # cosine LR scheduler
+        multi_scale=multi_scale,  # multi-scale training
+        cache=cache,  # cache images for faster training
+        workers=workers,  # data loading workers
+        # Augmentation ayarları (segmentasyon için optimize edilmiş)
+        hsv_h=0.015,  # hue augmentation
+        hsv_s=0.7,  # saturation augmentation
+        hsv_v=0.4,  # value augmentation
+        degrees=10.0,  # rotation (parsel için uygun)
+        translate=0.1,  # translation
+        scale=0.5,  # scaling
+        fliplr=0.5,  # horizontal flip
+        mosaic=1.0,  # mosaic augmentation
+        mixup=0.1,  # mixup augmentation (düşük tutuldu)
+        copy_paste=0.1,  # copy-paste augmentation (segmentasyon için iyi)
     )
 
 
@@ -57,6 +84,53 @@ def predict(
         cv2.imwrite(str(out_path), img)
 
 
+def export(
+    weights: Path,
+    format: str = "onnx",
+    imgsz: int = 512,
+    device: str = "cpu",
+    half: bool = False,
+    simplify: bool = True,
+    opset: int | None = None,
+    workspace: int | None = None,
+) -> None:
+    """
+    Eğitilmiş modeli farklı formatlara export eder.
+
+    Desteklenen formatlar:
+    - onnx: ONNX formatı (en yaygın)
+    - torchscript: PyTorch TorchScript
+    - tensorrt: NVIDIA TensorRT (GPU gerekli)
+    - coreml: Apple CoreML (macOS/iOS)
+    - engine: TensorRT engine dosyası
+    - saved_model: TensorFlow SavedModel
+    - pb: TensorFlow protobuf
+    - tflite: TensorFlow Lite
+    - edgetpu: Google Edge TPU
+    - paddle: PaddlePaddle
+    - ncnn: NCNN
+    - openvino: OpenVINO
+    """
+    model = YOLO(str(weights))
+
+    export_kwargs = {
+        "format": format,
+        "imgsz": imgsz,
+        "device": device,
+        "half": half,
+        "simplify": simplify,
+    }
+
+    if opset is not None:
+        export_kwargs["opset"] = opset
+    if workspace is not None:
+        export_kwargs["workspace"] = workspace
+
+    # Export işlemi
+    exported_path = model.export(**export_kwargs)
+    print(f"Model başarıyla export edildi: {exported_path}")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YOLO ile parsel segmentasyonu")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -72,32 +146,74 @@ def build_argparser() -> argparse.ArgumentParser:
     train_p.add_argument(
         "--epochs",
         type=int,
-        default=50,
-        help="Eğitim epoch sayısı",
+        default=100,
+        help="Eğitim epoch sayısı (önerilen: 100-200)",
     )
     train_p.add_argument(
         "--imgsz",
         type=int,
-        default=512,
-        help="Girdi çözünürlüğü",
+        default=640,
+        help="Girdi çözünürlüğü (önerilen: 640 veya 832)",
     )
     train_p.add_argument(
         "--batch",
         type=int,
-        default=8,
-        help="Batch size",
+        default=16,
+        help="Batch size (GPU varsa 16-32, CPU için 4-8)",
     )
     train_p.add_argument(
         "--model",
         type=str,
-        default="yolov8n-seg.pt",
-        help="Başlangıç segmentasyon modeli (ör: yolov8n-seg.pt)",
+        default="yolov8s-seg.pt",
+        help="Başlangıç segmentasyon modeli (yolov8n/s/m/l/x-seg.pt)",
     )
     train_p.add_argument(
         "--device",
         type=str,
         default="cpu",
-        help="PyTorch device (ör: cpu, 0, 0,1)",
+        help="PyTorch device (ör: cpu, 0, cuda, 0,1)",
+    )
+    train_p.add_argument(
+        "--patience",
+        type=int,
+        default=50,
+        help="Early stopping patience (epoch sayısı)",
+    )
+    train_p.add_argument(
+        "--lr0",
+        type=float,
+        default=0.001,
+        help="Initial learning rate (önerilen: 0.001)",
+    )
+    train_p.add_argument(
+        "--cos-lr",
+        action="store_true",
+        default=True,
+        help="Cosine learning rate scheduler kullan",
+    )
+    train_p.add_argument(
+        "--no-cos-lr",
+        dest="cos_lr",
+        action="store_false",
+        help="Cosine LR scheduler'ı kapat",
+    )
+    train_p.add_argument(
+        "--multi-scale",
+        action="store_true",
+        default=False,
+        help="Multi-scale training (yavaşlatır ama iyileştirir)",
+    )
+    train_p.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Görüntüleri RAM'de cache'le (hızlandırır ama RAM gerektirir)",
+    )
+    train_p.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Data loading worker sayısı (varsayılan: 8)",
     )
 
     # predict
@@ -133,6 +249,76 @@ def build_argparser() -> argparse.ArgumentParser:
         help="PyTorch device (ör: cpu, 0, 0,1)",
     )
 
+    # export
+    export_p = subparsers.add_parser("export", help="Eğitilmiş modeli export et")
+    export_p.add_argument(
+        "--weights",
+        type=str,
+        required=True,
+        help="Eğitilmiş .pt ağırlık dosyası (örn: models/field-seg/weights/best.pt)",
+    )
+    export_p.add_argument(
+        "--format",
+        type=str,
+        default="onnx",
+        choices=[
+            "onnx",
+            "torchscript",
+            "tensorrt",
+            "coreml",
+            "engine",
+            "saved_model",
+            "pb",
+            "tflite",
+            "edgetpu",
+            "paddle",
+            "ncnn",
+            "openvino",
+        ],
+        help="Export formatı (varsayılan: onnx)",
+    )
+    export_p.add_argument(
+        "--imgsz",
+        type=int,
+        default=512,
+        help="Girdi çözünürlüğü",
+    )
+    export_p.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="PyTorch device (ör: cpu, 0, 0,1)",
+    )
+    export_p.add_argument(
+        "--half",
+        action="store_true",
+        help="FP16 quantizasyon (TensorRT, ONNX için)",
+    )
+    export_p.add_argument(
+        "--simplify",
+        action="store_true",
+        default=True,
+        help="ONNX modelini sadeleştir (varsayılan: True)",
+    )
+    export_p.add_argument(
+        "--no-simplify",
+        dest="simplify",
+        action="store_false",
+        help="ONNX sadeleştirmeyi kapat",
+    )
+    export_p.add_argument(
+        "--opset",
+        type=int,
+        default=None,
+        help="ONNX opset versiyonu (varsayılan: otomatik)",
+    )
+    export_p.add_argument(
+        "--workspace",
+        type=int,
+        default=None,
+        help="TensorRT workspace boyutu (GB)",
+    )
+
     return parser
 
 
@@ -159,6 +345,12 @@ def main() -> None:
             imgsz=args.imgsz,
             batch=args.batch,
             device=args.device,
+            patience=getattr(args, "patience", 50),
+            lr0=getattr(args, "lr0", 0.001),
+            cos_lr=getattr(args, "cos_lr", True),
+            multi_scale=getattr(args, "multi_scale", False),
+            cache=getattr(args, "cache", False),
+            workers=getattr(args, "workers", 8),
         )
     elif args.command == "predict":
         predict(
@@ -167,6 +359,17 @@ def main() -> None:
             imgsz=args.imgsz,
             conf=args.conf,
             device=args.device,
+        )
+    elif args.command == "export":
+        export(
+            weights=Path(args.weights),
+            format=args.format,
+            imgsz=args.imgsz,
+            device=args.device,
+            half=args.half,
+            simplify=args.simplify,
+            opset=args.opset,
+            workspace=args.workspace,
         )
     else:
         parser.print_help()
