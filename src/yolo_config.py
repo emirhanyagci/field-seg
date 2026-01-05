@@ -35,5 +35,3 @@ def write_data_yaml(
 
 
 __all__ = ["write_data_yaml"]
-
-
